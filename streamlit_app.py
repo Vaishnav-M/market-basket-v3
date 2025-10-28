@@ -1,7 +1,7 @@
 """
-🛒 Instacart Market Basket Analysis - Streamlit App
-Real transaction data from 3.4M+ Instacart orders
-Discover shopping patterns, customer segments, and product associations
+🛒 Market Basket Analysis - Complete ML Dashboard
+Features: Association Rules, Customer Segmentation, Purchase Prediction
+Works with Instacart 50K sample OR custom CSV upload
 """
 
 import streamlit as st
@@ -10,462 +10,491 @@ import numpy as np
 import sys
 from pathlib import Path
 import plotly.express as px
-import plotly.graph_objects as go
-from mlxtend.frequent_patterns import apriori, association_rules
-from mlxtend.preprocessing import TransactionEncoder
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent / 'src'))
 
+from analysis import MarketBasketAnalyzer
+from ml_models import CustomerSegmentation, PurchasePrediction
+from utils import (
+    get_transaction_stats,
+    get_top_products,
+    plot_top_products,
+    plot_rules_scatter,
+    generate_placement_recommendations,
+    export_results
+)
+
 # Page config
 st.set_page_config(
-    page_title="Instacart Market Basket Analysis",
+    page_title="Market Basket Analysis Dashboard",
     page_icon="🛒",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 # Custom CSS
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
+        font-size: 2.5rem;
         font-weight: bold;
-        color: #FF6B6B;
         text-align: center;
-        padding: 1rem;
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
         padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #667eea;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 3rem;
-        padding: 0 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
-if 'transactions_df' not in st.session_state:
-    st.session_state.transactions_df = None
-if 'rules_df' not in st.session_state:
-    st.session_state.rules_df = None
+if 'analyzer' not in st.session_state:
+    st.session_state.analyzer = None
+if 'rules' not in st.session_state:
+    st.session_state.rules = None
+if 'transactions' not in st.session_state:
+    st.session_state.transactions = None
+if 'predictor' not in st.session_state:
+    st.session_state.predictor = None
+if 'X_train_columns' not in st.session_state:
+    st.session_state.X_train_columns = None
+if 'target_product' not in st.session_state:
+    st.session_state.target_product = None
 
 # Header
-st.markdown('<h1 class="main-header">🛒 Instacart Market Basket Analysis</h1>', unsafe_allow_html=True)
-st.markdown("### Discover Shopping Patterns from Real Customer Data")
+st.markdown('<h1 class="main-header">🛒 Market Basket Analysis - ML Dashboard</h1>', unsafe_allow_html=True)
+st.markdown("### Association Rules · Customer Segmentation · Purchase Prediction")
 st.markdown("---")
 
 # Sidebar
-with st.sidebar:
-    st.image("https://img.icons8.com/clouds/100/000000/shopping-cart.png", width=100)
-    st.title("📊 Control Panel")
-    
-    st.markdown("### 📁 Data Source")
-    data_option = st.radio(
-        "Choose dataset:",
-        ["Instacart 50K (Real Data)", "Upload Custom CSV"],
-        help="Use pre-converted Instacart data or upload your own Transaction,Item format CSV"
-    )
-    
-    if data_option == "Upload Custom CSV":
-        uploaded_file = st.file_uploader(
-            "Upload Transaction CSV",
-            type=['csv'],
-            help="CSV with columns: Transaction, Item"
-        )
-    else:
-        uploaded_file = None
-    
-    st.markdown("---")
-    st.markdown("### ⚙️ Analysis Settings")
-    
-    min_support = st.slider(
-        "Min Support",
-        min_value=0.001,
-        max_value=0.1,
-        value=0.01,
-        step=0.001,
-        help="Minimum frequency for itemsets (1% = 0.01)"
-    )
-    
-    min_confidence = st.slider(
-        "Min Confidence",
-        min_value=0.1,
-        max_value=1.0,
-        value=0.3,
-        step=0.05,
-        help="Minimum confidence for association rules"
-    )
-    
-    min_lift = st.slider(
-        "Min Lift",
-        min_value=1.0,
-        max_value=5.0,
-        value=1.5,
-        step=0.1,
-        help="Minimum lift (strength) for rules"
-    )
-    
-    st.markdown("---")
-    if st.button("🚀 Run Analysis", type="primary", use_container_width=True):
-        st.session_state.run_analysis = True
-    
-    st.markdown("---")
-    st.markdown("### 📖 About")
-    st.info("""
-    **Real Instacart Data:**
-    - 50,000 customer orders
-    - 29,084 unique products
-    - Avg 10 items/basket
-    - From 3.4M+ orders dataset
-    """)
+st.sidebar.header("⚙️ Configuration")
 
-# Load data
-@st.cache_data
-def load_data(file_path=None):
-    """Load transaction data from file or uploaded CSV"""
-    if file_path:
-        df = pd.read_csv(file_path)
-    else:
-        # Default Instacart data
-        df = pd.read_csv('data/instacart_transactions_50k.csv')
-    
-    return df
+# Data source
+st.sidebar.subheader("📁 Data Source")
+data_option = st.sidebar.radio(
+    "Choose dataset:",
+    ["📦 Instacart 50K (Real Data)", "📤 Upload Custom CSV"],
+    help="Use pre-loaded Instacart sample or upload your own"
+)
 
-@st.cache_data
-def prepare_basket_data(df):
-    """Convert transaction format to basket matrix"""
-    # Group items by transaction
-    baskets = df.groupby('Transaction')['Item'].apply(list).values
-    
-    # Transform to one-hot encoded matrix
-    te = TransactionEncoder()
-    te_ary = te.fit(baskets).transform(baskets)
-    basket_df = pd.DataFrame(te_ary, columns=te.columns_)
-    
-    return basket_df, baskets
+uploaded_file = None
+if data_option == "📤 Upload Custom CSV":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload Transaction Data (CSV)",
+        type=['csv'],
+        help="CSV file with 'Transaction' and 'Item' columns"
+    )
+else:
+    # Auto-load Instacart data
+    uploaded_file = "data/instacart_transactions_50k.csv"
 
-@st.cache_data
-def run_apriori_analysis(basket_df, min_support, min_confidence, min_lift):
-    """Run Apriori algorithm and generate association rules"""
-    # Find frequent itemsets
-    frequent_itemsets = apriori(basket_df, min_support=min_support, use_colnames=True)
-    
-    if len(frequent_itemsets) == 0:
-        return None, None
-    
-    # Generate rules
-    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
-    
-    if len(rules) == 0:
-        return frequent_itemsets, None
-    
-    # Filter by lift
-    rules = rules[rules['lift'] >= min_lift]
-    
-    # Convert frozensets to strings for display
-    rules['antecedents_str'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
-    rules['consequents_str'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
-    
-    # Sort by lift
-    rules = rules.sort_values('lift', ascending=False)
-    
-    return frequent_itemsets, rules
+st.sidebar.markdown("---")
+
+# Performance settings
+st.sidebar.subheader("⚡ Performance")
+max_products = st.sidebar.number_input(
+    "Max Products (for speed)",
+    min_value=50,
+    max_value=1000,
+    value=200,
+    step=50,
+    help="Limit products to avoid memory issues"
+)
+
+st.sidebar.markdown("---")
+
+# Algorithm parameters
+st.sidebar.subheader("🎛️ Algorithm Parameters")
+
+min_support = st.sidebar.slider(
+    "Minimum Support (%)",
+    min_value=0.01,
+    max_value=5.0,
+    value=0.1,
+    step=0.01,
+    help="Minimum frequency of itemset"
+) / 100
+
+min_confidence = st.sidebar.slider(
+    "Minimum Confidence (%)",
+    min_value=1,
+    max_value=100,
+    value=5,
+    step=1,
+    help="Minimum probability threshold"
+) / 100
+
+min_lift = st.sidebar.slider(
+    "Minimum Lift",
+    min_value=1.0,
+    max_value=5.0,
+    value=1.2,
+    step=0.1,
+    help="Minimum correlation strength"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**✨ Features:**
+- 🔍 Association Rules
+- 👥 Customer Segments  
+- 🎯 Purchase Prediction
+
+**📊 Instacart Sample:**
+- 50K real orders
+- 29K unique products
+- Avg 10 items/basket
+""")
 
 # Main content
-if not st.session_state.data_loaded or (uploaded_file is not None):
-    # Load data
+if uploaded_file is not None:
     try:
-        if uploaded_file:
-            st.session_state.transactions_df = pd.read_csv(uploaded_file)
-            st.success(f"✅ Uploaded: {len(st.session_state.transactions_df)} rows")
+        # Read data
+        if isinstance(uploaded_file, str):
+            # File path (Instacart sample)
+            df = pd.read_csv(uploaded_file)
+            st.success(f"✅ Loaded Instacart 50K: {len(df):,} rows")
         else:
-            st.session_state.transactions_df = load_data()
-            st.success("✅ Loaded Instacart 50K dataset")
+            # Uploaded file
+            df = pd.read_csv(uploaded_file)
+            st.success(f"✅ File uploaded: {len(df):,} rows")
         
-        st.session_state.data_loaded = True
+        # Show preview
+        with st.expander("📋 Data Preview"):
+            st.dataframe(df.head(20))
+            st.write(f"**Columns:** {', '.join(df.columns.tolist())}")
         
-    except FileNotFoundError:
-        st.error("""
-        ⚠️ **Instacart dataset not found!**
+        # Column mapping
+        if isinstance(uploaded_file, str):
+            # Instacart data has standard columns
+            transaction_col = 'Transaction'
+            item_col = 'Item'
+        else:
+            # Let user map columns
+            st.sidebar.subheader("Column Mapping")
+            transaction_col = st.sidebar.selectbox(
+                "Transaction ID Column",
+                options=df.columns.tolist(),
+                index=0 if 'Transaction' not in df.columns else df.columns.tolist().index('Transaction')
+            )
+            item_col = st.sidebar.selectbox(
+                "Item Column",
+                options=df.columns.tolist(),
+                index=1 if 'Item' not in df.columns else df.columns.tolist().index('Item')
+            )
         
-        Please run the converter first:
-        ```bash
-        python convert_instacart_data.py
-        ```
+        # Filter data for performance
+        st.info(f"🎯 Filtering to top {max_products} most popular products...")
+        product_counts = df[item_col].value_counts()
+        popular_products = product_counts.head(max_products).index
         
-        Or upload your own CSV file using the sidebar.
-        """)
-        st.stop()
+        df_filtered = df[df[item_col].isin(popular_products)].copy()
+        st.success(f"✅ Filtered: {df[item_col].nunique():,} → {df_filtered[item_col].nunique():,} products ({len(df_filtered):,} records)")
+        
+        # Get transactions
+        transactions = df_filtered.groupby(transaction_col)[item_col].apply(list).values.tolist()
+        all_products = sorted(list(set([item for transaction in transactions for item in transaction])))
+        
+        st.markdown("---")
+        
+        # Create tabs
+        tab1, tab2, tab3 = st.tabs(["🔍 Association Rules", "👥 Customer Segmentation", "🎯 Purchase Prediction"])
+        
+        # ============================================================================
+        # TAB 1: ASSOCIATION RULES
+        # ============================================================================
+        with tab1:
+            st.subheader("🔍 Market Basket Analysis (Apriori Algorithm)")
+            st.write("Find products that are frequently bought together")
+            
+            if st.button("🚀 Run Association Rules Analysis", type="primary"):
+                with st.spinner("Analyzing transactions..."):
+                    # Initialize analyzer
+                    analyzer = MarketBasketAnalyzer(
+                        min_support=min_support,
+                        min_confidence=min_confidence,
+                        min_lift=min_lift
+                    )
+                    
+                    analyzer.transactions = transactions
+                    st.session_state.analyzer = analyzer
+                    st.session_state.transactions = transactions
+                    
+                    # Get statistics
+                    stats = get_transaction_stats(transactions)
+                
+                # Display statistics
+                st.subheader("📊 Transaction Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Transactions", f"{stats['total_transactions']:,}")
+                with col2:
+                    st.metric("Unique Products", f"{stats['unique_products']:,}")
+                with col3:
+                    st.metric("Total Items Sold", f"{stats['total_items_sold']:,}")
+                with col4:
+                    st.metric("Avg Items/Transaction", f"{stats['avg_items_per_transaction']:.2f}")
+                
+                # Top products
+                st.subheader("🏆 Top Products")
+                top_products = get_top_products(transactions, n=10)
+                
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.dataframe(top_products, use_container_width=True)
+                
+                with col2:
+                    fig = plot_top_products(transactions, n=10)
+                    st.pyplot(fig)
+                
+                # Run analysis
+                st.subheader("🔍 Association Rules Analysis")
+                
+                encoded_df = analyzer.encode_transactions()
+                frequent_itemsets = analyzer.find_frequent_itemsets(encoded_df)
+                
+                if len(frequent_itemsets) == 0:
+                    st.warning("⚠️ No frequent itemsets found. Try lowering the minimum support threshold.")
+                else:
+                    st.success(f"✅ Found {len(frequent_itemsets)} frequent itemsets")
+                    
+                    rules = analyzer.generate_rules(metric='lift')
+                    
+                    if len(rules) == 0:
+                        st.warning("⚠️ No association rules found. Try lowering the confidence or lift thresholds.")
+                    else:
+                        st.success(f"✅ Generated {len(rules)} association rules")
+                        
+                        # Display top rules
+                        st.subheader("📈 Top Association Rules")
+                        
+                        top_n = st.slider("Number of rules to display", min_value=5, max_value=50, value=10)
+                        top_rules = analyzer.get_top_rules(n=top_n, metric='lift')
+                        
+                        formatted_rules = analyzer.format_rules_for_display(top_rules)
+                        st.dataframe(formatted_rules, use_container_width=True)
+                        
+                        # Visualizations
+                        st.subheader("📊 Visualizations")
+                        
+                        fig_scatter = plot_rules_scatter(top_rules)
+                        st.plotly_chart(fig_scatter, use_container_width=True)
+                        
+                        # Placement recommendations
+                        st.subheader("💡 Shelf Placement Recommendations")
+                        
+                        recommendations = generate_placement_recommendations(top_rules, top_n=10)
+                        st.dataframe(recommendations, use_container_width=True)
+                        
+                        st.session_state.rules = rules
+                        
+                        # Export
+                        if st.button("Download Results as CSV"):
+                            export_results(top_rules, filename='market_basket_results.csv')
+                            st.success("✅ Results exported!")
+            
+            # Product search - persists after button
+            if st.session_state.analyzer is not None and st.session_state.rules is not None:
+                st.subheader("🔎 Product Recommendation Search")
+                
+                all_products_search = sorted(list(set([item for transaction in st.session_state.transactions for item in transaction])))
+                selected_product = st.selectbox("Select a product:", all_products_search, key="product_search")
+                
+                if selected_product:
+                    product_recs = st.session_state.analyzer.get_product_recommendations(selected_product)
+                    
+                    if len(product_recs) > 0:
+                        st.write(f"**Products frequently bought with '{selected_product}':**")
+                        formatted_recs = st.session_state.analyzer.format_rules_for_display(product_recs)
+                        st.dataframe(formatted_recs, use_container_width=True)
+                    else:
+                        st.info(f"No strong associations found for '{selected_product}'")
+        
+        # ============================================================================
+        # TAB 2: CUSTOMER SEGMENTATION
+        # ============================================================================
+        with tab2:
+            st.subheader("👥 Customer Segmentation (K-Means Clustering)")
+            st.write("Group customers based on shopping behavior")
+            
+            n_clusters = st.slider("Number of Customer Segments", min_value=2, max_value=8, value=4)
+            
+            if st.button("🚀 Run Customer Segmentation", type="primary", key="seg_btn"):
+                with st.spinner("Segmenting customers..."):
+                    # Initialize segmentation
+                    segmenter = CustomerSegmentation(n_clusters=n_clusters)
+                    
+                    # Create features
+                    customer_features = segmenter.create_customer_features(df_filtered, transaction_col, item_col)
+                    
+                    # Fit model
+                    segmenter.fit(customer_features)
+                    
+                    # Get profiles
+                    profiles = segmenter.get_segment_profiles()
+                    
+                    st.success(f"✅ Identified {n_clusters} customer segments!")
+                    
+                    # Display profiles
+                    st.subheader("📊 Segment Profiles")
+                    st.dataframe(profiles, use_container_width=True)
+                    
+                    # Distribution
+                    st.subheader("👥 Customer Distribution by Segment")
+                    segment_counts = customer_features['cluster'].value_counts().sort_index()
+                    
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        fig = px.bar(
+                            x=segment_counts.index,
+                            y=segment_counts.values,
+                            labels={'x': 'Segment ID', 'y': 'Number of Customers'},
+                            title='Customer Distribution Across Segments'
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        for idx, row in profiles.iterrows():
+                            st.metric(
+                                row['Segment_Name'],
+                                f"{segment_counts[idx]} customers",
+                                f"{segment_counts[idx]/len(customer_features)*100:.1f}%"
+                            )
+                    
+                    # Insights
+                    st.subheader("💡 Segment Insights")
+                    for idx, row in profiles.iterrows():
+                        with st.expander(f"{row['Segment_Name']} (Segment {idx})"):
+                            st.write(f"**Average Items per Transaction:** {row['num_items']:.1f}")
+                            st.write(f"**Product Variety:** {row['unique_categories']:.1f}")
+                            st.write(f"**Transaction Value:** ₹{row['transaction_value']:.2f}")
+                            st.write(f"**Number of Customers:** {segment_counts[idx]}")
+        
+        # ============================================================================
+        # TAB 3: PURCHASE PREDICTION
+        # ============================================================================
+        with tab3:
+            st.subheader("🎯 Next Purchase Prediction (Random Forest)")
+            st.write("Predict what customers will buy based on their current basket")
+            
+            # Select target product
+            target_product = st.selectbox("Select Product to Predict:", all_products)
+            
+            if st.button("🚀 Train Prediction Model", type="primary", key="pred_btn"):
+                with st.spinner(f"Training model to predict '{target_product}' purchases..."):
+                    # Initialize predictor
+                    predictor = PurchasePrediction()
+                    
+                    # Prepare data
+                    X_train, X_test, y_train, y_test = predictor.prepare_training_data(
+                        df_filtered, target_product, transaction_col, item_col
+                    )
+                    
+                    # Train
+                    predictor.train(X_train, y_train)
+                    
+                    # Evaluate
+                    report = predictor.evaluate(X_test, y_test)
+                    
+                    # Store in session
+                    st.session_state.predictor = predictor
+                    st.session_state.X_train_columns = X_train.columns.tolist()
+                    st.session_state.target_product = target_product
+                    
+                    st.success(f"✅ Model trained to predict '{target_product}' purchases!")
+                    
+                    # Metrics
+                    st.subheader("📊 Model Performance")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Accuracy", f"{report['accuracy']:.2%}")
+                    with col2:
+                        st.metric("Precision", f"{report['1']['precision']:.2%}")
+                    with col3:
+                        st.metric("Recall", f"{report['1']['recall']:.2%}")
+                    with col4:
+                        st.metric("F1-Score", f"{report['1']['f1-score']:.2%}")
+                    
+                    # Feature importance
+                    st.subheader("🔍 What Products Predict This Purchase?")
+                    feature_importance = predictor.get_feature_importance(X_train.columns.tolist())
+                    
+                    top_features = feature_importance.head(10)
+                    
+                    fig = px.bar(
+                        top_features,
+                        x='Importance',
+                        y='Product',
+                        orientation='h',
+                        title=f'Top 10 Products that Predict {target_product} Purchase',
+                        labels={'Importance': 'Feature Importance', 'Product': 'Product'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # Live prediction - persists after button
+            if st.session_state.predictor is not None:
+                st.subheader("🛒 Test Live Prediction")
+                st.write(f"Select products in a customer's basket and see if they'll buy **{st.session_state.target_product}**:")
+                
+                selected_products = st.multiselect(
+                    "Products in basket:",
+                    [p for p in all_products if p != st.session_state.target_product],
+                    key="prediction_basket"
+                )
+                
+                if selected_products and st.button("Predict", key="predict_btn"):
+                    # Create basket
+                    basket = {product: 1 if product in selected_products else 0 
+                             for product in st.session_state.X_train_columns}
+                    
+                    # Predict
+                    prediction, probability = st.session_state.predictor.predict_next_purchase(basket)
+                    
+                    if prediction == 1:
+                        st.success(f"✅ Customer will likely buy '{st.session_state.target_product}' ({probability:.1%} confidence)")
+                        st.write(f"💡 **Recommendation:** Suggest '{st.session_state.target_product}' to this customer!")
+                    else:
+                        st.info(f"❌ Customer unlikely to buy '{st.session_state.target_product}' ({probability:.1%} confidence)")
+    
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.stop()
+        st.error(f"❌ Error: {str(e)}")
+        st.error("Please make sure your CSV has the correct format with transaction and item columns.")
 
-# Display data overview
-if st.session_state.data_loaded:
-    df = st.session_state.transactions_df
+else:
+    # Welcome message
+    st.info("👈 Select data source from sidebar to begin")
     
-    # Metrics
-    col1, col2, col3, col4 = st.columns(4)
+    st.markdown("""
+    ### 📖 How to Use
     
-    with col1:
-        st.metric("📦 Total Purchases", f"{len(df):,}")
+    1. **Choose Data**: Instacart 50K sample OR upload your own CSV
+    2. **Configure**: Adjust algorithm parameters in sidebar
+    3. **Analyze**: Click buttons in each tab to run analysis
+    4. **Explore**: View results, charts, and recommendations
     
-    with col2:
-        n_transactions = df['Transaction'].nunique()
-        st.metric("🛒 Unique Baskets", f"{n_transactions:,}")
+    ### 📊 CSV Format Required
     
-    with col3:
-        n_products = df['Item'].nunique()
-        st.metric("🏷️ Unique Products", f"{n_products:,}")
+    | Transaction | Item |
+    |-------------|------|
+    | 1 | Banana |
+    | 1 | Milk |
+    | 2 | Bread |
     
-    with col4:
-        avg_basket = len(df) / n_transactions
-        st.metric("📊 Avg Items/Basket", f"{avg_basket:.1f}")
+    ### ✨ Features
     
-    st.markdown("---")
-    
-    # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🔍 Association Rules", 
-        "📈 Product Analytics", 
-        "🛒 Basket Patterns",
-        "💡 Recommendations"
-    ])
-    
-    with tab1:
-        st.header("🔍 Product Association Rules")
-        st.markdown("Discover which products are frequently bought together")
-        
-        if st.session_state.get('run_analysis', False):
-            with st.spinner("🔄 Mining association rules..."):
-                # Prepare basket data
-                basket_df, baskets = prepare_basket_data(df)
-                
-                # Run Apriori
-                frequent_itemsets, rules = run_apriori_analysis(
-                    basket_df, min_support, min_confidence, min_lift
-                )
-                
-                st.session_state.rules_df = rules
-                st.session_state.run_analysis = False
-        
-        if st.session_state.rules_df is not None and len(st.session_state.rules_df) > 0:
-            rules = st.session_state.rules_df
-            
-            st.success(f"✅ Found {len(rules)} strong association rules!")
-            
-            # Top rules
-            st.subheader("🏆 Top 10 Association Rules")
-            
-            display_cols = ['antecedents_str', 'consequents_str', 'support', 'confidence', 'lift']
-            display_df = rules[display_cols].head(10).copy()
-            display_df.columns = ['IF Customer Buys', 'THEN Also Buys', 'Support', 'Confidence', 'Lift']
-            
-            # Format percentages
-            display_df['Support'] = display_df['Support'].apply(lambda x: f"{x*100:.2f}%")
-            display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x*100:.1f}%")
-            display_df['Lift'] = display_df['Lift'].apply(lambda x: f"{x:.2f}x")
-            
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Visualization
-            st.subheader("📊 Rules Visualization")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Confidence vs Support scatter
-                fig = px.scatter(
-                    rules,
-                    x='support',
-                    y='confidence',
-                    size='lift',
-                    color='lift',
-                    hover_data=['antecedents_str', 'consequents_str'],
-                    labels={
-                        'support': 'Support',
-                        'confidence': 'Confidence',
-                        'lift': 'Lift'
-                    },
-                    title='Rules: Support vs Confidence (sized by Lift)',
-                    color_continuous_scale='Viridis'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Lift distribution
-                fig = px.histogram(
-                    rules,
-                    x='lift',
-                    nbins=30,
-                    title='Distribution of Lift Values',
-                    labels={'lift': 'Lift', 'count': 'Number of Rules'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Download rules
-            st.download_button(
-                "📥 Download Association Rules (CSV)",
-                data=rules.to_csv(index=False),
-                file_name="instacart_association_rules.csv",
-                mime="text/csv"
-            )
-            
-        elif st.session_state.get('run_analysis', False):
-            st.warning("⚠️ No rules found! Try lowering the minimum thresholds.")
-        else:
-            st.info("👆 Click '🚀 Run Analysis' in the sidebar to discover association rules!")
-    
-    with tab2:
-        st.header("📈 Product Analytics")
-        
-        # Top products
-        st.subheader("🏆 Top 20 Most Popular Products")
-        
-        product_counts = df['Item'].value_counts().head(20)
-        
-        fig = px.bar(
-            x=product_counts.values,
-            y=product_counts.index,
-            orientation='h',
-            labels={'x': 'Number of Purchases', 'y': 'Product'},
-            title='Most Frequently Purchased Products',
-            color=product_counts.values,
-            color_continuous_scale='Blues'
-        )
-        fig.update_layout(showlegend=False, height=600)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Product search
-        st.subheader("🔎 Product Search")
-        search_term = st.text_input("Search for a product:", "Banana")
-        
-        if search_term:
-            matching = df[df['Item'].str.contains(search_term, case=False, na=False)]
-            
-            if len(matching) > 0:
-                product_stats = matching.groupby('Item').agg({
-                    'Transaction': 'count'
-                }).reset_index()
-                product_stats.columns = ['Product', 'Purchase Count']
-                product_stats = product_stats.sort_values('Purchase Count', ascending=False)
-                
-                st.dataframe(product_stats, use_container_width=True, hide_index=True)
-            else:
-                st.warning(f"No products found matching '{search_term}'")
-    
-    with tab3:
-        st.header("🛒 Basket Analysis")
-        
-        # Basket size distribution
-        basket_sizes = df.groupby('Transaction').size()
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📊 Basket Size Distribution")
-            
-            fig = px.histogram(
-                basket_sizes,
-                nbins=50,
-                labels={'value': 'Items in Basket', 'count': 'Number of Baskets'},
-                title='How many items do customers buy?'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("📈 Basket Size Statistics")
-            
-            stats_df = pd.DataFrame({
-                'Metric': ['Min', 'Max', 'Mean', 'Median', '25th Percentile', '75th Percentile'],
-                'Value': [
-                    basket_sizes.min(),
-                    basket_sizes.max(),
-                    f"{basket_sizes.mean():.1f}",
-                    basket_sizes.median(),
-                    basket_sizes.quantile(0.25),
-                    basket_sizes.quantile(0.75)
-                ]
-            })
-            
-            st.dataframe(stats_df, use_container_width=True, hide_index=True)
-        
-        # Sample baskets
-        st.subheader("🛍️ Sample Customer Baskets")
-        
-        n_samples = st.slider("Number of baskets to show:", 1, 10, 5)
-        
-        sample_transactions = df['Transaction'].unique()[:n_samples]
-        
-        for trans_id in sample_transactions:
-            basket = df[df['Transaction'] == trans_id]['Item'].tolist()
-            
-            with st.expander(f"🛒 Basket #{trans_id} ({len(basket)} items)"):
-                st.write(", ".join(basket))
-    
-    with tab4:
-        st.header("💡 Smart Recommendations")
-        
-        st.markdown("""
-        ### 🎯 Product Placement Strategies
-        
-        Based on the association rules discovered from real Instacart data:
-        """)
-        
-        if st.session_state.rules_df is not None and len(st.session_state.rules_df) > 0:
-            rules = st.session_state.rules_df
-            
-            # Strategy 1: Cross-selling opportunities
-            st.subheader("🛍️ Cross-Selling Opportunities")
-            
-            top_rules = rules.nlargest(5, 'lift')
-            
-            for idx, rule in top_rules.iterrows():
-                antecedent = rule['antecedents_str']
-                consequent = rule['consequents_str']
-                confidence = rule['confidence'] * 100
-                lift = rule['lift']
-                
-                st.info(f"""
-                **If customer buys:** {antecedent}  
-                **Recommend:** {consequent}  
-                📊 {confidence:.0f}% of customers who buy {antecedent} also buy {consequent}  
-                💪 {lift:.1f}x stronger than random chance
-                """)
-            
-            # Strategy 2: Product bundling
-            st.subheader("📦 Suggested Product Bundles")
-            
-            bundle_rules = rules[rules['lift'] > 2.0].head(3)
-            
-            for idx, rule in bundle_rules.iterrows():
-                items = list(rule['antecedents']) + list(rule['consequents'])
-                st.success(f"**Bundle #{idx+1}:** {', '.join(items)}")
-            
-        else:
-            st.info("Run the analysis to get recommendations!")
+    - **🔍 Association Rules**: Find products bought together
+    - **👥 Customer Segments**: Group customers by behavior
+    - **🎯 Purchase Prediction**: Predict next purchases
+    """)
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>🛒 Built with Streamlit | Data: Instacart Market Basket Dataset | 50K Real Customer Orders</p>
+    <p>🛒 Market Basket Analysis Dashboard | Built with Streamlit & Python</p>
 </div>
 """, unsafe_allow_html=True)
