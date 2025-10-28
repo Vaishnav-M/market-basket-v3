@@ -33,6 +33,7 @@ data/*.zip
 data/instacart-data/
 data/indian/
 !data/sample_transactions.csv
+!data/instacart_transactions_50k.csv
 
 # Archive Files
 *.zip
